@@ -5,5 +5,5 @@ import (
 )
 
 func main() {
-	cnn.Test()
+	cnn.ResNetImageNetMultipleImage(18, 0, 0)
 }
