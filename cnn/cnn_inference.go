@@ -76,18 +76,26 @@ func ResNetImageNetMultipleImage(layerNum int, startImageID, endImageID int) {
 	var params hefloat.Parameters
 	var pk *rlwe.PublicKey
 	var sk *rlwe.SecretKey
-	var btpevk15 *bootstrapping.EvaluationKeys
 	var rlk *rlwe.RelinearizationKey
 	var rtk []*rlwe.GaloisKey
 
+	parThreadNum := 4
+	var wg_th sync.WaitGroup
+	wg_th.Add(parThreadNum)
 	for i := 0; i < threadNum; i++ {
 		//generate bootstrapper
-		if i == 0 {
-			btpevk15, sk, _ = btpParams15.GenEvaluationKeys(initsk)
+		btparr := make([]*bootstrapping.Evaluator, parThreadNum)
+		var btpevk15_ *bootstrapping.EvaluationKeys
+		btpevk15_, sk, _ = btpParams15.GenEvaluationKeys(initsk)
+		for j := 0; j < parThreadNum; j++ {
+			go func() {
+				defer wg_th.Done()
+				btparr[j], _ = bootstrapping.NewEvaluator(btpParams15, btpevk15_)
+			}()
 		}
-
-		var btp15 *bootstrapping.Evaluator
-		btp15, _ = bootstrapping.NewEvaluator(btpParams15, btpevk15)
+		wg_th.Wait()
+		runtime.GC()
+		btp15 := btparr[0]
 
 		fmt.Println("generated bootstrapper end")
 		if i == 0 {
@@ -128,7 +136,7 @@ func ResNetImageNetMultipleImage(layerNum int, startImageID, endImageID int) {
 		evaluator := hefloat.NewEvaluator(params, evk)
 		fmt.Println("generate Evaluator end")
 
-		contexts[i] = NewContext(encoder, encryptor, decryptor, sk, pk, btp15, rtk, rlk, evaluator, &params)
+		contexts[i] = NewContext(encoder, encryptor, decryptor, sk, pk, btparr, rtk, rlk, evaluator, &params)
 	}
 
 	// result image label
@@ -184,13 +192,14 @@ func ResNetImageNet(layerNum int, image [][]float64, context *Context, log_write
 	encoder, decryptor := context.encoder_, context.decryptor_
 	co, st, fh, fw := 64, 2, 7, 7
 	logp := 46
-	logq := 51
 	logn := 16
 	n := 1 << logn
 	stage := 0
 	epsilon := 0.00001
 	B := 40.0
 	linWgt, linBias, convBNWgt, shortcutWgt, blockNum := ImportParametersImageNet(layerNum)
+
+	threadNum := 4
 
 	for i := 0; i < 3; i++ {
 		for len(image[i]) < n {
@@ -201,26 +210,30 @@ func ResNetImageNet(layerNum int, image [][]float64, context *Context, log_write
 		}
 	}
 
-	cnn := NewTensorCipherFormData(1, 224, 224, 3, 3, logn, logq, image, context)
+	cnn := NewTensorCipherFormData(1, 224, 224, 3, 3, logn, logp, image, context)
 	fmt.Println("preprocess & encrypt inference image end")
+	fmt.Println(context.params_.MaxLevel())
 
+	//start level = 33(19 + 14)
 	fmt.Println("drop level")
+	fmt.Printf("start level : %d, currenlevel : %d\n", cnn.ciphers_[0].Level(), cnn.ciphers_[0].Level()-31)
 	for i := 0; i < cnn.m_; i++ {
-		evaluator.DropLevel(cnn.ciphers_[i], 30)
+		evaluator.DropLevel(cnn.ciphers_[i], 31)
 	}
 
 	totalTimeStart := time.Now()
 	_ = totalTimeStart
 	_, _, _ = params, encoder, decryptor
-	_ = logp
 	cnn = compactGappedConvolutionPrint(cnn, co, st, fh, fw, convBNWgt[stage].convwgt, convBNWgt[stage].bnvar, convBNWgt[stage].bnwgt, epsilon, context, stage, log_writer)
-	os.Exit(0)
 	cnn = compactGappedBatchNormPrint(cnn, convBNWgt[stage].bnbias, convBNWgt[stage].bnmean, convBNWgt[stage].bnvar, convBNWgt[stage].bnwgt, epsilon, B, context, stage, log_writer)
 	for i := 0; i < cnn.m_; i++ {
 		evaluator.SetScale(cnn.ciphers_[i], rlwe.NewScale(1<<logp))
 	}
-	cnn = approxReLUPrint(cnn, 13, log_writer, context, stage)
-	cnn = maxPoolingPrint(cnn, st, fh, fw, context, stage, log_writer)
+	cnn = bootstrapPrint(cnn, context, stage, threadNum, log_writer)
+	cnn = approxReLUPrint(cnn, 14, log_writer, context, stage)
+	cnn = bootstrapPrint(cnn, context, stage, threadNum, log_writer)
+	cnn = maxPoolingPrint(cnn, 2, 3, 3, 14, context, stage, log_writer)
+	os.Exit(0)
 
 	stage++
 
@@ -247,7 +260,7 @@ func ResNetImageNet(layerNum int, image [][]float64, context *Context, log_write
 			}
 			cnn = compactGappedConvolutionPrint(cnn, co, st, fh, fw, convBNWgt[stage].convwgt, convBNWgt[stage].bnvar, convBNWgt[stage].bnwgt, epsilon, context, stage, log_writer)
 			cnn = compactGappedBatchNormPrint(cnn, convBNWgt[stage].bnbias, convBNWgt[stage].bnmean, convBNWgt[stage].bnvar, convBNWgt[stage].bnwgt, epsilon, B, context, stage, log_writer)
-			cnn = bootstrapPrint(cnn, context, stage, log_writer)
+			cnn = bootstrapPrint(cnn, context, stage, threadNum, log_writer)
 			cnn = approxReLUPrint(cnn, 13, log_writer, context, stage)
 
 			stage++
@@ -262,7 +275,7 @@ func ResNetImageNet(layerNum int, image [][]float64, context *Context, log_write
 				tempCnn = compactGappedBatchNormPrint(tempCnn, shortcutWgt[idx].bnbias, shortcutWgt[idx].bnmean, shortcutWgt[idx].bnvar, shortcutWgt[idx].bnwgt, epsilon, B, context, stage, log_writer)
 			}
 			cnn = cipherAddPrint(cnn, tempCnn, context, stage, log_writer)
-			cnn = bootstrapPrint(cnn, context, stage, log_writer)
+			cnn = bootstrapPrint(cnn, context, stage, threadNum, log_writer)
 			cnn = approxReLUPrint(cnn, 13, log_writer, context, stage)
 			stage++
 		}

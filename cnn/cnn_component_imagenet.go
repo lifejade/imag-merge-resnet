@@ -6,6 +6,7 @@ import (
 	"os"
 	"runtime"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/tuneinsight/lattigo/v5/core/rlwe"
@@ -37,18 +38,23 @@ func compactGappedConvolutionPrint(cnn TensorCipher, co, st, fh, fw int, convWgt
 	timeStart := time.Now()
 	cnnOut := compactGappedConvolution(cnn, co, st, fh, fw, convWgt, bnVar, bnWgt, epsilon, context, stage)
 	elapse := time.Since(timeStart)
-	fmt.Printf("===================================================================================\n")
-	log_writer.WriteString("===================================================================================\n")
 
-	fmt.Printf("time: %s \n", elapse)
-	fmt.Print("convolution ", stage, " result\n")
-	log_writer.WriteString("time: " + elapse.String() + "\n")
-	log_writer.WriteString("convolution " + strconv.Itoa(stage) + " result\n")
-	decryptPrintTxt(cnnOut.ciphers_, log_writer, context, 17)
+	str := fmt.Sprintln("===================================================================================")
+	fmt.Print(str)
+	log_writer.WriteString(str)
+
+	str = fmt.Sprintf("time: %s \n", elapse)
+	fmt.Print(str)
+	log_writer.WriteString(str)
+
+	str = fmt.Sprintf("convolution %d-stage result\n", stage)
+	fmt.Print(str)
+	log_writer.WriteString(str)
+
+	decryptPrintTxt(cnnOut.ciphers_, log_writer, context, 4)
 	printParmsTxt(cnnOut, log_writer)
 
-	fmt.Printf("===================================================================================\n")
-	log_writer.WriteString("===================================================================================\n")
+	log_writer.WriteString(fmt.Sprintln("==================================================================================="))
 	log_writer.Flush()
 	return cnnOut
 }
@@ -121,16 +127,14 @@ func compactGappedConvolution(cnn TensorCipher, co, st, fh, fw int, convWgt, bnV
 	fmt.Printf("elapse - init CNN Weight: %s \n", elapse)
 
 	checkTime = time.Now()
-	selectOneVec := make([][]float64, ko*ko)
-	for i := 0; i < ko*ko; i++ {
+	selectOneVec := make([][]float64, co)
+	for i := 0; i < co; i++ {
 		bnValue := bnWgt[i] / math.Sqrt(bnVar[i]+epsilon)
-		//temp
-		bnValue = 1
 		selectOneVec[i] = make([]float64, n)
 		for j := 0; j < n; j++ {
 			i4 := j % (ko * wo)
 			i3 := (j / (ko * wo)) % (ko * ho)
-			if ko*(i3%ko)+(i4%ko) == i {
+			if (ko*(i3%ko)+(i4%ko) == (i % (ko * ko))) && (j < ko*ko*wo*ho) {
 				selectOneVec[i][j] = bnValue
 			} else {
 				selectOneVec[i][j] = 0
@@ -182,18 +186,288 @@ func compactGappedConvolution(cnn TensorCipher, co, st, fh, fw int, convWgt, bnV
 }
 
 func compactGappedBatchNormPrint(cnn TensorCipher, bnbias, bnmean, bnvar, bnwgt []float64, epsilon, B float64, context *Context, stage int, log_writer *bufio.Writer) TensorCipher {
-	return cnn
+	timeStart := time.Now()
+	cnnOut := compactGappedBatchNorm(cnn, bnbias, bnmean, bnvar, bnwgt, epsilon, B, context)
+	elapse := time.Since(timeStart)
+	str := fmt.Sprintln("===================================================================================")
+	fmt.Print(str)
+	log_writer.WriteString(str)
+
+	str = fmt.Sprintf("time: %s \n", elapse)
+	fmt.Print(str)
+	log_writer.WriteString(str)
+
+	str = fmt.Sprintf("batchnorm %d-stage result\n", stage)
+	fmt.Print(str)
+	log_writer.WriteString(str)
+	decryptPrintTxt(cnnOut.ciphers_, log_writer, context, 4)
+	printParmsTxt(cnnOut, log_writer)
+
+	str = fmt.Sprintln("===================================================================================")
+	fmt.Print(str)
+	log_writer.WriteString(str)
+	log_writer.Flush()
+	return cnnOut
 }
+
+func compactGappedBatchNorm(cnn TensorCipher, bias, runningMean, runningVar, weight []float64, epsilon, B float64, context *Context) TensorCipher {
+	h, w, c, k, m := cnn.h_, cnn.w_, cnn.c_, cnn.k_, cnn.m_
+	n := 1 << cnn.logn_
+	eval := context.eval_
+
+	cm_iVec := make([][]float64, m)
+	for i := 0; i < m; i++ {
+		cm_iVec[i] = make([]float64, n)
+		for j := 0; j < n; j++ {
+			i4 := j % (k * w)
+			i3 := (j / (k * w)) % (k * h)
+
+			if j < k*k*w*h {
+				index := (k*(i3%k) + (i4 % k)) + i*k*k
+				cm_iVec[i][j] = bias[index] - weight[index]*runningMean[index]/math.Sqrt(runningVar[index]+epsilon)
+				cm_iVec[i][j] /= B
+			} else {
+				cm_iVec[i][j] = 0.0
+			}
+		}
+	}
+	fmt.Printf("%f \n", cm_iVec[0][0])
+	result_cipher := make([]*rlwe.Ciphertext, m)
+	for i := 0; i < m; i++ {
+		result_cipher[i], _ = eval.AddNew(cnn.ciphers_[i], cm_iVec[i])
+	}
+
+	cnnOut := NewTensorCipher(k, h, w, c, m, cnn.logn_, result_cipher)
+	return cnnOut
+}
+
 func approxReLUPrint(cnn TensorCipher, alpha int, log_writer *bufio.Writer, context *Context, stage int) TensorCipher {
+	timeStart := time.Now()
+	cnnOut := approxReLU(cnn, alpha, context)
+	elapse := time.Since(timeStart)
+	str := fmt.Sprintln("===================================================================================")
+	fmt.Print(str)
+	log_writer.WriteString(str)
+
+	str = fmt.Sprintf("time: %s \n", elapse)
+	fmt.Print(str)
+	log_writer.WriteString(str)
+
+	str = fmt.Sprintf("ReLU %d-stage result\n", stage)
+	fmt.Print(str)
+	log_writer.WriteString(str)
+	decryptPrintTxt(cnnOut.ciphers_, log_writer, context, 4)
+	printParmsTxt(cnnOut, log_writer)
+
+	str = fmt.Sprintln("===================================================================================")
+	fmt.Print(str)
+	log_writer.WriteString(str)
+	log_writer.Flush()
+	return cnnOut
+}
+
+func approxReLU(cnnIn TensorCipher, alpha int, context *Context) (cnnOut TensorCipher) {
+
+	// parameter setting
+	h, w, k, c, m, logn := cnnIn.h_, cnnIn.w_, cnnIn.k_, cnnIn.c_, cnnIn.m_, cnnIn.logn_
+	ctxtIns := cnnIn.ciphers_
+	result_cipher := make([]*rlwe.Ciphertext, m)
+
+	for i := 0; i < m; i++ {
+		result_cipher[i] = EvalApproxMinimaxReLU(ctxtIns[i], alpha, context)
+	}
+
+	// temp = EvalApproxReLU(ctxtIn, alpha, context.eval_, context.params_)
+	// temp = EvalApproxReLUDebug(ctxtIn, alpha, context, context.params_)
+
+	cnnOut = NewTensorCipher(k, h, w, c, m, logn, result_cipher)
+
+	return cnnOut
+
+}
+
+func maxPoolingPrint(cnn TensorCipher, st, fh, fw, alpha int, context *Context, stage int, log_writer *bufio.Writer) TensorCipher {
+	timeStart := time.Now()
+	cnnOut := maxPooling(cnn, st, fh, fw, alpha, context)
+	elapse := time.Since(timeStart)
+
+	str := fmt.Sprintln("===================================================================================")
+	fmt.Print(str)
+	log_writer.WriteString(str)
+
+	str = fmt.Sprintf("time: %s \n", elapse)
+	fmt.Print(str)
+	log_writer.WriteString(str)
+
+	str = fmt.Sprintf("MaxPooling %d-stage result\n", stage)
+	fmt.Print(str)
+	log_writer.WriteString(str)
+	decryptPrintTxt(cnnOut.ciphers_, log_writer, context, 4)
+	printParmsTxt(cnnOut, log_writer)
+
+	str = fmt.Sprintln("===================================================================================")
+	fmt.Print(str)
+	log_writer.WriteString(str)
+	log_writer.Flush()
 	return cnn
 }
 
-func maxPoolingPrint(cnn TensorCipher, st, fh, fw int, context *Context, stage int, log_writer *bufio.Writer) TensorCipher {
-	return cnn
+func maxPooling(cnn TensorCipher, st, fh, fw, alpha int, context *Context) TensorCipher {
+	if st != 2 || fh != 3 || fw != 3 {
+		fmt.Println("error")
+		os.Exit(0)
+	}
+
+	ki, hi, wi, ci, mi, logn := cnn.k_, cnn.h_, cnn.w_, cnn.c_, cnn.m_, cnn.logn_
+	ko, ho, wo, co, mo := ki, hi, wi, ci, mi
+	if st == 2 {
+		ko, ho, wo, mo = ki*2, hi/2, wi/2, mi/(2*2)
+	}
+	eval := context.eval_
+	n := 1 << logn
+	if ko != 4 {
+		fmt.Println("error")
+		os.Exit(0)
+	}
+
+	masking := make([][][]float64, fh)
+	for h := range fh {
+		masking[h] = make([][]float64, fw)
+		for w := range fw {
+			masking[h][w] = make([]float64, n)
+			wg := ki * ((fw-1)/2 - w)
+			hg := ki * ((fh-1)/2 - h)
+			for j := range n {
+				i1 := n % (wi * ki)
+				i2 := (n / (wi * ki)) % (hi * ki)
+				w_ := (i1 + wg)
+				h_ := (i2 + hg)
+				if w_ >= 0 && w_ < ki*wi && h_ >= 0 && h_ < ki*hi {
+					masking[h][w][j] = 1
+				} else {
+					masking[h][w][j] = 0
+				}
+			}
+		}
+	}
+	maskingFinale := make([][]float64, n)
+	for i := 0; i < 4; i++ {
+		maskingFinale[i] = make([]float64, n)
+		for j := 0; j < n; j++ {
+			i4 := j % (ko * wo)
+			i3 := (j / (ko * wo)) % (ko * ho)
+			i1 := i % 2
+			i2 := (i / 2) % 2
+			if 2*i1 <= (i4%ko) && (i4%ko) < 2*(i1+1) && 2*i2 <= (i3%ko) && (i3%ko) < 2*(i2+1) && (j < ko*ko*wo*ho) {
+				maskingFinale[i][j] = 1
+			} else {
+				maskingFinale[i][j] = 0
+			}
+		}
+	}
+
+	result_cipher := make([]*rlwe.Ciphertext, mo)
+	for i := range mo {
+		result_cipher[i] = ctZero(context)
+	}
+
+	for m := 0; m < mi; m++ {
+		ctxt := make([][]*rlwe.Ciphertext, fh)
+		for h := 0; h < fh; h++ {
+			ctxt[h] = make([]*rlwe.Ciphertext, fw)
+			for w := 0; w < fw; w++ {
+				r := ki*ki*wi*(h-(fh-1)/2) + ki*(w-(fw-1)/2)
+				ctxt[h][w], _ = eval.RotateNew(cnn.ciphers_[m], r)
+				eval.Mul(ctxt[h][w], masking[h][w], ctxt[h][w])
+				eval.Rescale(ctxt[h][w], ctxt[h][w])
+			}
+		}
+
+		fmt.Printf("%dth m is running... \n", m)
+		var max_temp [3]*rlwe.Ciphertext
+		var wg sync.WaitGroup
+		wg.Add(3)
+		for i := range 3 {
+			max_temp[i] = EvalApproxMinimaxMax3(ctxt[i][0], ctxt[i][1], ctxt[i][2], alpha, context)
+		}
+		for i := range 3 {
+			go func() {
+				defer wg.Done()
+				max_temp[i], _ = context.btp15_[i].Bootstrap(max_temp[i])
+			}()
+		}
+		wg.Wait()
+		for i := range 3 {
+			temp, _ := eval.ConjugateNew(max_temp[i])
+			eval.Add(max_temp[i], temp, max_temp[i])
+		}
+		max := EvalApproxMinimaxMax3(max_temp[0], max_temp[1], max_temp[2], alpha, context)
+		fmt.Println("max is over")
+		r := ki*(m%2) + ki*ki*wi*((m/2)%2)
+		maxRot, _ := eval.RotateNew(max, r)
+		eval.Mul(maxRot, maskingFinale[m%4], maxRot)
+		eval.Add(result_cipher[m/4], maxRot, result_cipher[m/4])
+	}
+	for i := range mo {
+		eval.Rescale(result_cipher[i], result_cipher[i])
+	}
+	cnnOut := NewTensorCipher(ko, ho, wo, co, mo, logn, result_cipher)
+	return cnnOut
 }
 
-func bootstrapPrint(cnn TensorCipher, context *Context, stage int, log_writer *bufio.Writer) TensorCipher {
-	return cnn
+func bootstrapPrint(cnn TensorCipher, context *Context, stage, threadNum int, log_writer *bufio.Writer) TensorCipher {
+	timeStart := time.Now()
+	cnnOut := bootstrapImageImaginary(cnn, threadNum, context)
+	elapse := time.Since(timeStart)
+
+	str := fmt.Sprintln("===================================================================================")
+	fmt.Print(str)
+	log_writer.WriteString(str)
+
+	str = fmt.Sprintf("time: %s \n", elapse)
+	fmt.Print(str)
+	log_writer.WriteString(str)
+
+	str = fmt.Sprintf("Bootstrapp %d-stage result\n", stage)
+	fmt.Print(str)
+	log_writer.WriteString(str)
+	decryptPrintTxt(cnnOut.ciphers_, log_writer, context, 4)
+	printParmsTxt(cnnOut, log_writer)
+
+	str = fmt.Sprintln("===================================================================================")
+	fmt.Print(str)
+	log_writer.WriteString(str)
+	log_writer.Flush()
+	return cnnOut
+}
+func bootstrapImageImaginary(cnnIn TensorCipher, threadNum int, context *Context) (cnnOut TensorCipher) {
+	// parameters
+	mi, ki, hi, wi, ci, logn := cnnIn.m_, cnnIn.k_, cnnIn.h_, cnnIn.w_, cnnIn.c_, cnnIn.logn_
+	mo, ko, ho, wo, co := mi, ki, hi, wi, ci
+
+	result_cipher := make([]*rlwe.Ciphertext, mo)
+
+	var wg sync.WaitGroup
+	wg.Add(threadNum)
+	for i3 := 0; i3 < threadNum; i3++ {
+		i3 := i3
+		go func() {
+			defer wg.Done()
+			for i := 0; i < mo; i++ {
+				if i%threadNum == i3 {
+					fmt.Printf("boot %d: \n", i)
+					result_cipher[i], _ = context.btp15_[i3].Bootstrap(cnnIn.ciphers_[i])
+				}
+			}
+		}()
+	}
+	wg.Wait()
+	for i := 0; i < mo; i++ {
+		temp2, _ := context.eval_.ConjugateNew(result_cipher[i]) // imaginary removing bootstrapping
+		result_cipher[i], _ = context.eval_.AddNew(result_cipher[i], temp2)
+	}
+	cnnOut = NewTensorCipher(ko, ho, wo, co, mo, logn, result_cipher)
+	return cnnOut
 }
 
 func cipherAddPrint(cnn TensorCipher, adder TensorCipher, context *Context, stage int, log_writer *bufio.Writer) TensorCipher {
@@ -259,7 +533,7 @@ type Context struct {
 	decryptor_ *rlwe.Decryptor
 	sk_        *rlwe.SecretKey
 	pk_        *rlwe.PublicKey
-	btp15_     *bootstrapping.Evaluator
+	btp15_     []*bootstrapping.Evaluator
 	rotkeys_   []*rlwe.GaloisKey
 	rlk_       *rlwe.RelinearizationKey
 	eval_      *hefloat.Evaluator
@@ -267,7 +541,7 @@ type Context struct {
 }
 
 func NewContext(encoder *hefloat.Encoder, encryptor *rlwe.Encryptor, decryptor *rlwe.Decryptor, sk *rlwe.SecretKey,
-	pk *rlwe.PublicKey, btp15 *bootstrapping.Evaluator, rotkeys []*rlwe.GaloisKey, rlk *rlwe.RelinearizationKey,
+	pk *rlwe.PublicKey, btp15 []*bootstrapping.Evaluator, rotkeys []*rlwe.GaloisKey, rlk *rlwe.RelinearizationKey,
 	eval *hefloat.Evaluator, params *hefloat.Parameters) *Context {
 	result := Context{
 		encoder_:   encoder,

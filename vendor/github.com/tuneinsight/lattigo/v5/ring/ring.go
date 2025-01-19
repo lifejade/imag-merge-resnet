@@ -71,6 +71,10 @@ func (rt Type) MarshalJSON() ([]byte, error) {
 type Ring struct {
 	SubRings []*SubRing
 
+	ModulusChainCached  []uint64
+	BRedConstantsCached [][]uint64 // Barrett Reduction
+	MRedConstantsCached []uint64   // Montgomery Reduction
+
 	// Product of the Moduli for each level
 	ModulusAtLevel []*big.Int
 
@@ -196,46 +200,57 @@ func (r Ring) AtLevel(level int) *Ring {
 }
 
 // MaxLevel returns the maximum level allowed by the ring (#NbModuli -1).
-func (r Ring) MaxLevel() int {
+func (r *Ring) MaxLevel() int {
 	return r.ModuliChainLength() - 1
 }
 
 // ModuliChain returns the list of primes in the modulus chain.
-func (r Ring) ModuliChain() (moduli []uint64) {
-	moduli = make([]uint64, len(r.SubRings))
+func (r *Ring) ModuliChain() []uint64 {
+	if r.ModulusChainCached != nil {
+		return r.ModulusChainCached
+	}
+	r.ModulusChainCached = make([]uint64, len(r.SubRings))
 	for i := range r.SubRings {
-		moduli[i] = r.SubRings[i].Modulus
+		r.ModulusChainCached[i] = r.SubRings[i].Modulus
 	}
 
-	return
+	return r.ModulusChainCached
 }
 
 // Modulus returns the modulus of the target ring at the currently
 // set level in *big.Int.
-func (r Ring) Modulus() *big.Int {
+func (r *Ring) Modulus() *big.Int {
 	return r.ModulusAtLevel[r.level]
 }
 
 // MRedConstants returns the concatenation of the Montgomery constants
 // of the target ring.
-func (r Ring) MRedConstants() (MRC []uint64) {
-	MRC = make([]uint64, len(r.SubRings))
-	for i := range r.SubRings {
-		MRC[i] = r.SubRings[i].MRedConstant
+func (r *Ring) MRedConstants() []uint64 {
+	if r.MRedConstantsCached != nil {
+		return r.MRedConstantsCached
 	}
 
-	return
+	r.MRedConstantsCached = make([]uint64, len(r.SubRings))
+	for i := range r.SubRings {
+		r.MRedConstantsCached[i] = r.SubRings[i].MRedConstant
+	}
+
+	return r.MRedConstantsCached
 }
 
 // BRedConstants returns the concatenation of the Barrett constants
 // of the target ring.
-func (r Ring) BRedConstants() (BRC [][]uint64) {
-	BRC = make([][]uint64, len(r.SubRings))
-	for i := range r.SubRings {
-		BRC[i] = r.SubRings[i].BRedConstant
+func (r *Ring) BRedConstants() [][]uint64 {
+	if r.BRedConstantsCached != nil {
+		return r.BRedConstantsCached
 	}
 
-	return
+	r.BRedConstantsCached = make([][]uint64, len(r.SubRings))
+	for i := range r.SubRings {
+		r.BRedConstantsCached[i] = r.SubRings[i].BRedConstant
+	}
+
+	return r.BRedConstantsCached
 }
 
 // NewRing creates a new RNS Ring with degree N and coefficient moduli Moduli with Standard NTT. N must be a power of two larger than 8. Moduli should be
