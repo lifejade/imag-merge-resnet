@@ -1,6 +1,7 @@
 package test
 
 import (
+	"fmt"
 	"testing"
 
 	"github.com/lifejade/imag-merge-resnet/cnn"
@@ -20,4 +21,8 @@ func Test_Load(t *testing.T) {
 		t.Logf("%f\n", v)
 	}
 	t.Logf("%d\n", len(temp[0].a))
+}
+
+func Test_Mod(t *testing.T) {
+	fmt.Println(-61 % 3)
 }

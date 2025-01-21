@@ -6,7 +6,7 @@ import (
 	"github.com/tuneinsight/lattigo/v5/core/rlwe"
 )
 
-func EvalApproxMinimaxReLU(cipherin *rlwe.Ciphertext, alpha int, context *Context) (destination *rlwe.Ciphertext) {
+func EvalApproxMinimaxReLU(cipherin *rlwe.Ciphertext, alpha int, context *Context, threadidx int) (destination *rlwe.Ciphertext) {
 
 	if alpha == 13 {
 
@@ -23,10 +23,10 @@ func EvalApproxMinimaxReLU(cipherin *rlwe.Ciphertext, alpha int, context *Contex
 		}
 
 		scaleContext := scaleinv.ScaleContext{
-			Encoder_:   context.encoder_,
-			Encryptor_: context.encryptor_,
+			Encoder_:   context.encoders_[threadidx],
+			Encryptor_: context.encryptors_[threadidx],
 			Decryptor_: context.decryptor_,
-			Eval_:      context.eval_,
+			Eval_:      context.evals_[threadidx],
 			Params_:    *context.params_,
 		}
 
@@ -47,10 +47,10 @@ func EvalApproxMinimaxReLU(cipherin *rlwe.Ciphertext, alpha int, context *Contex
 		}
 
 		scaleContext := scaleinv.ScaleContext{
-			Encoder_:   context.encoder_,
-			Encryptor_: context.encryptor_,
+			Encoder_:   context.encoders_[threadidx],
+			Encryptor_: context.encryptors_[threadidx],
 			Decryptor_: context.decryptor_,
-			Eval_:      context.eval_,
+			Eval_:      context.evals_[threadidx],
 			Params_:    *context.params_,
 		}
 
@@ -78,10 +78,10 @@ func EvalApproxMinimaxMax(cipherin1, cipherin2 *rlwe.Ciphertext, alpha int, cont
 		}
 
 		scaleContext := scaleinv.ScaleContext{
-			Encoder_:   context.encoder_,
-			Encryptor_: context.encryptor_,
+			Encoder_:   context.encoders_[0],
+			Encryptor_: context.encryptors_[0],
 			Decryptor_: context.decryptor_,
-			Eval_:      context.eval_,
+			Eval_:      context.evals_[0],
 			Params_:    *context.params_,
 		}
 
@@ -102,10 +102,10 @@ func EvalApproxMinimaxMax(cipherin1, cipherin2 *rlwe.Ciphertext, alpha int, cont
 		}
 
 		scaleContext := scaleinv.ScaleContext{
-			Encoder_:   context.encoder_,
-			Encryptor_: context.encryptor_,
+			Encoder_:   context.encoders_[0],
+			Encryptor_: context.encryptors_[0],
 			Decryptor_: context.decryptor_,
-			Eval_:      context.eval_,
+			Eval_:      context.evals_[0],
 			Params_:    *context.params_,
 		}
 
@@ -116,7 +116,7 @@ func EvalApproxMinimaxMax(cipherin1, cipherin2 *rlwe.Ciphertext, alpha int, cont
 	return destination
 }
 
-func EvalApproxMinimaxMax3(cipherin1, cipherin2, cipherin3 *rlwe.Ciphertext, alpha int, context *Context) (destination *rlwe.Ciphertext) {
+func EvalApproxMinimaxMax3(cipherin1, cipherin2, cipherin3 *rlwe.Ciphertext, alpha int, context *Context, threadidx int) (destination *rlwe.Ciphertext) {
 
 	if alpha == 13 {
 
@@ -133,10 +133,10 @@ func EvalApproxMinimaxMax3(cipherin1, cipherin2, cipherin3 *rlwe.Ciphertext, alp
 		}
 
 		scaleContext := scaleinv.ScaleContext{
-			Encoder_:   context.encoder_,
-			Encryptor_: context.encryptor_,
+			Encoder_:   context.encoders_[threadidx],
+			Encryptor_: context.encryptors_[threadidx],
 			Decryptor_: context.decryptor_,
-			Eval_:      context.eval_,
+			Eval_:      context.evals_[threadidx],
 			Params_:    *context.params_,
 		}
 
@@ -157,10 +157,10 @@ func EvalApproxMinimaxMax3(cipherin1, cipherin2, cipherin3 *rlwe.Ciphertext, alp
 		}
 
 		scaleContext := scaleinv.ScaleContext{
-			Encoder_:   context.encoder_,
-			Encryptor_: context.encryptor_,
+			Encoder_:   context.encoders_[threadidx],
+			Encryptor_: context.encryptors_[threadidx],
 			Decryptor_: context.decryptor_,
-			Eval_:      context.eval_,
+			Eval_:      context.evals_[threadidx],
 			Params_:    *context.params_,
 		}
 

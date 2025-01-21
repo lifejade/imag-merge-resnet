@@ -5,5 +5,5 @@ import (
 )
 
 func main() {
-	cnn.ResNetImageNetMultipleImage(18, 0, 0)
+	cnn.ResNetImageNetMultyThread(18, 0, 64)
 }

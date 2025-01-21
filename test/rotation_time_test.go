@@ -2,10 +2,11 @@ package test
 
 import (
 	"fmt"
-	"os"
+	"math"
 	"runtime"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/lifejade/imag-merge-resnet/cnn"
 	"github.com/tuneinsight/lattigo/v5/core/rlwe"
@@ -13,16 +14,10 @@ import (
 	"github.com/tuneinsight/lattigo/v5/utils/sampling"
 )
 
-func Test_Maxfunc(t *testing.T) {
+func Test_RotTime(t *testing.T) {
 	//CPU full power
 	runtime.GOMAXPROCS(runtime.NumCPU()) // CPU 개수를 구한 뒤 사용할 최대 CPU 개수 설정
 	fmt.Println("Maximum number of CPUs: ", runtime.GOMAXPROCS(0))
-	layerNum := 18
-	//check layernumber
-	if !(layerNum == 18 || layerNum == 32) {
-		fmt.Println("layer_num is not correct")
-		os.Exit(1)
-	}
 
 	//ckks parameter init
 	ckksParams := cnn.CNN_Cifar18_Parameters
@@ -46,71 +41,70 @@ func Test_Maxfunc(t *testing.T) {
 	pk = kgen.GenPublicKeyNew(sk)
 	rlk = kgen.GenRelinearizationKeyNew(sk)
 	// generate keys - Rotating key
-	convRot := []int{0, 1, 2, 3, 4, 5}
-	galEls := make([]uint64, len(convRot))
-	for i, x := range convRot {
-		galEls[i] = params.GaloisElement(x)
+	galEls := make([]uint64, 16)
+	for i := range 16 {
+		galEls[i] = params.GaloisElement(int(math.Pow(2, float64(i))))
 	}
 	galEls = append(galEls, params.GaloisElementForComplexConjugation())
 
 	rtk = make([]*rlwe.GaloisKey, len(galEls))
-	var wg sync.WaitGroup
-	wg.Add(len(galEls))
+	var wg_ sync.WaitGroup
+	wg_.Add(len(galEls))
 	for i := range galEls {
 		i := i
 		go func() {
-			defer wg.Done()
+			defer wg_.Done()
 			kgen_ := rlwe.NewKeyGenerator(params)
 			rtk[i] = kgen_.GenGaloisKeyNew(galEls[i], sk)
 		}()
 	}
-	wg.Wait()
+	wg_.Wait()
 	evk := rlwe.NewMemEvaluationKeySet(rlk, rtk...)
 	//generate -er
 	encryptor := rlwe.NewEncryptor(params, pk)
 	decryptor := rlwe.NewDecryptor(params, sk)
 	encoder := hefloat.NewEncoder(params)
 	evaluator := hefloat.NewEvaluator(params, evk)
+	_, _, _, _ = encoder, encryptor, decryptor, evaluator
 
 	fmt.Println("generate Evaluator end")
-	context := cnn.NewContext([]*hefloat.Encoder{encoder}, []*rlwe.Encryptor{encryptor}, decryptor, sk, pk, nil, nil, []*hefloat.Evaluator{evaluator}, &params, 1)
-
-	cipher := make([]*rlwe.Ciphertext, 2)
 	n := 1 << params.LogMaxSlots()
-	for i, _ := range cipher {
-		value := make([]float64, n)
-		for j := range value {
-			if (i+j)%3 == 0 {
-				value[j] = sampling.RandFloat64(0.001, 0.003)
-			} else {
-				value[j] = -sampling.RandFloat64(0.001, 0.003)
-			}
-
+	value := make([]float64, n)
+	for i := range n {
+		if (i)%3 == 0 {
+			value[i] = sampling.RandFloat64(0.001, 0.003)
+		} else {
+			value[i] = -sampling.RandFloat64(0.001, 0.003)
 		}
-		plaintext1 := hefloat.NewPlaintext(params, params.MaxLevel())
-		encoder.Encode(value, plaintext1)
-		cipher[i], _ = encryptor.EncryptNew(plaintext1)
 	}
+	fmt.Println("value init end")
 
-	for i := range cipher {
-		cnn.DecryptPrint(params, cipher[i], *decryptor, *encoder)
+	plaintext1 := hefloat.NewPlaintext(params, params.MaxLevel())
+	encoder.Encode(value, plaintext1)
+	cipher, _ := encryptor.EncryptNew(plaintext1)
+
+	cnn.DecryptPrint(params, cipher, *decryptor, *encoder)
+	startTime := time.Now()
+	rot, _ := evaluator.RotateNew(cipher, 16)
+	elapse := time.Since(startTime)
+	fmt.Println(elapse)
+	cnn.DecryptPrint(params, rot, *decryptor, *encoder)
+	fmt.Println("//////////////////////////////////////")
+	rot2 := cipher.CopyNew()
+	startTime = time.Now()
+	for i := range 16 {
+		_ = i
+		evaluator.Rotate(rot2, 1, rot2)
 	}
-	fmt.Println(params.MaxLevel())
-
-	result := cnn.EvalApproxMinimaxMax(cipher[0], cipher[1], 14, context)
-	cnn.DecryptPrint(params, result, *decryptor, *encoder)
+	elapse = time.Since(startTime)
+	fmt.Println(elapse)
+	cnn.DecryptPrint(params, rot2, *decryptor, *encoder)
 }
 
-func Test_Maxfunc3(t *testing.T) {
+func Test_RotHoistTime(t *testing.T) {
 	//CPU full power
 	runtime.GOMAXPROCS(runtime.NumCPU()) // CPU 개수를 구한 뒤 사용할 최대 CPU 개수 설정
 	fmt.Println("Maximum number of CPUs: ", runtime.GOMAXPROCS(0))
-	layerNum := 18
-	//check layernumber
-	if !(layerNum == 18 || layerNum == 32) {
-		fmt.Println("layer_num is not correct")
-		os.Exit(1)
-	}
 
 	//ckks parameter init
 	ckksParams := cnn.CNN_Cifar18_Parameters
@@ -134,56 +128,73 @@ func Test_Maxfunc3(t *testing.T) {
 	pk = kgen.GenPublicKeyNew(sk)
 	rlk = kgen.GenRelinearizationKeyNew(sk)
 	// generate keys - Rotating key
-	convRot := []int{0, 1, 2, 3, 4, 5}
-	galEls := make([]uint64, len(convRot))
-	for i, x := range convRot {
-		galEls[i] = params.GaloisElement(x)
+	galEls := make([]uint64, 16)
+	for i := range 16 {
+		galEls[i] = params.GaloisElement(int(math.Pow(2, float64(i))))
 	}
 	galEls = append(galEls, params.GaloisElementForComplexConjugation())
 
 	rtk = make([]*rlwe.GaloisKey, len(galEls))
-	var wg sync.WaitGroup
-	wg.Add(len(galEls))
+	var wg_ sync.WaitGroup
+	wg_.Add(len(galEls))
 	for i := range galEls {
 		i := i
 		go func() {
-			defer wg.Done()
+			defer wg_.Done()
 			kgen_ := rlwe.NewKeyGenerator(params)
 			rtk[i] = kgen_.GenGaloisKeyNew(galEls[i], sk)
 		}()
 	}
-	wg.Wait()
+	wg_.Wait()
 	evk := rlwe.NewMemEvaluationKeySet(rlk, rtk...)
 	//generate -er
 	encryptor := rlwe.NewEncryptor(params, pk)
 	decryptor := rlwe.NewDecryptor(params, sk)
 	encoder := hefloat.NewEncoder(params)
 	evaluator := hefloat.NewEvaluator(params, evk)
+	_, _, _, _ = encoder, encryptor, decryptor, evaluator
 
 	fmt.Println("generate Evaluator end")
-	context := cnn.NewContext([]*hefloat.Encoder{encoder}, []*rlwe.Encryptor{encryptor}, decryptor, sk, pk, nil, nil, []*hefloat.Evaluator{evaluator}, &params, 1)
-
-	cipher := make([]*rlwe.Ciphertext, 3)
 	n := 1 << params.LogMaxSlots()
-	for i, _ := range cipher {
-		value := make([]float64, n)
-		for j := range value {
-			if (i+j)%3 == 0 {
-				value[j] = sampling.RandFloat64(0.01, 0.03)
-			} else {
-				value[j] = -sampling.RandFloat64(0.01, 0.03)
-			}
+	value := make([]float64, n)
+	for i := range n {
+		if (i)%3 == 0 {
+			value[i] = sampling.RandFloat64(0.001, 0.003)
+		} else {
+			value[i] = -sampling.RandFloat64(0.001, 0.003)
 		}
-		plaintext1 := hefloat.NewPlaintext(params, params.MaxLevel())
-		encoder.Encode(value, plaintext1)
-		cipher[i], _ = encryptor.EncryptNew(plaintext1)
+	}
+	plaintext1 := hefloat.NewPlaintext(params, params.MaxLevel())
+	encoder.Encode(value, plaintext1)
+	cipher, _ := encryptor.EncryptNew(plaintext1)
+	cnn.DecryptPrint(params, cipher, *decryptor, *encoder)
+
+	rtc := make([]*rlwe.Ciphertext, 4)
+	arr := []int{1, 2, 4, 8}
+	startTime := time.Now()
+	for i := range rtc {
+		rtc[i], _ = evaluator.RotateNew(cipher, arr[i])
+	}
+	elapse := time.Since(startTime)
+	fmt.Println(elapse)
+	for i := range rtc {
+		cnn.DecryptPrint(params, rtc[i], *decryptor, *encoder)
 	}
 
-	for i := range cipher {
-		cnn.DecryptPrint(params, cipher[i], *decryptor, *encoder)
-	}
-	fmt.Println(params.MaxLevel())
+	fmt.Println("//////////////////////////////////////")
 
-	result := cnn.EvalApproxMinimaxMax3(cipher[0], cipher[1], cipher[2], 14, context, 0)
-	cnn.DecryptPrint(params, result, *decryptor, *encoder)
+	startTime = time.Now()
+	rtc2, _ := evaluator.RotateHoistedNew(cipher, arr)
+	elapse = time.Since(startTime)
+	fmt.Println(elapse)
+	for i := range rtc2 {
+		fmt.Println(i)
+		cnn.DecryptPrint(params, rtc2[i], *decryptor, *encoder)
+	}
+
+	for i := range rtk {
+		fmt.Println(rtk[i].BaseTwoDecomposition)
+		fmt.Println(rtk[i].NthRoot)
+	}
+
 }

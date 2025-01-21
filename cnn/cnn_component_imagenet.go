@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"fmt"
 	"os"
-	"runtime"
 	"strconv"
 	"sync"
 	"time"
@@ -36,7 +35,7 @@ type WeightConvBN struct {
 
 func compactGappedConvolutionPrint(cnn TensorCipher, co, st, fh, fw int, convWgt, bnVar, bnWgt []float64, epsilon float64, context *Context, stage int, log_writer *bufio.Writer) TensorCipher {
 	timeStart := time.Now()
-	cnnOut := compactGappedConvolution(cnn, co, st, fh, fw, convWgt, bnVar, bnWgt, epsilon, context, stage)
+	cnnOut := compactGappedConvolution(cnn, co, st, fh, fw, convWgt, bnVar, bnWgt, epsilon, context)
 	elapse := time.Since(timeStart)
 
 	str := fmt.Sprintln("===================================================================================")
@@ -59,7 +58,8 @@ func compactGappedConvolutionPrint(cnn TensorCipher, co, st, fh, fw int, convWgt
 	return cnnOut
 }
 
-func compactGappedConvolution(cnn TensorCipher, co, st, fh, fw int, convWgt, bnVar, bnWgt []float64, epsilon float64, context *Context, stage int) TensorCipher {
+// 목표 : time: 4m37.839912277s 보다는 빠르게!
+func compactGappedConvolution(cnn TensorCipher, co, st, fh, fw int, convWgt, bnVar, bnWgt []float64, epsilon float64, context *Context) TensorCipher {
 	hi, wi, ki, ci, mi := cnn.h_, cnn.w_, cnn.k_, cnn.c_, cnn.m_
 	var ho, wo, ko, mo int
 	if st == 1 {
@@ -72,27 +72,42 @@ func compactGappedConvolution(cnn TensorCipher, co, st, fh, fw int, convWgt, bnV
 	}
 	logn := cnn.logn_
 	n := 1 << cnn.logn_
-	eval := context.eval_
+	evals := context.evals_
+	threadNum := context.threadNum_
 
-	_, _ = n, ci
-	checkTime := time.Now()
 	mo = (co + ko*ko - 1) / (ko * ko)
 	ctxt := make([][][]*rlwe.Ciphertext, mi)
 	for m := 0; m < mi; m++ {
 		ctxt[m] = make([][]*rlwe.Ciphertext, fh)
-		for h := 0; h < fh; h++ {
+		for h := range fh {
 			ctxt[m][h] = make([]*rlwe.Ciphertext, fw)
-			for w := 0; w < fw; w++ {
-				r := ki*ki*wi*(h-(fh-1)/2) + ki*(w-(fw-1)/2)
-				ctxt[m][h][w], _ = eval.RotateNew(cnn.ciphers_[m], r)
-
-			}
 		}
 	}
+	checkTime := time.Now()
+	var wg sync.WaitGroup
+	wg.Add(threadNum)
+	for thidx := range threadNum {
+		go func() {
+			defer wg.Done()
+			for m := 0; m < mi; m++ {
+				for h := 0; h < fh; h++ {
+					for w := 0; w < fw; w++ {
+						idx := m*fh*fw + h*fw + w
+						if (thidx-idx)%threadNum != 0 {
+							continue
+						}
+						r := ki*ki*wi*(h-(fh-1)/2) + ki*(w-(fw-1)/2)
+						//ctxt[m][h][w], _ = evals[m].RotateNew(cnn.ciphers_[m], r)
+						ctxt[m][h][w] = rotCtNew(cnn.ciphers_[m], r, context, thidx)
+					}
+				}
+			}
+		}()
+	}
+	wg.Wait()
 	elapse := time.Since(checkTime)
-	fmt.Printf("elapse - Rotate Input Data: %s \n", elapse)
+	fmt.Println("ct rot end : ", elapse)
 
-	checkTime = time.Now()
 	compactWeightVec := make([][][][][]float64, fh)
 	for i1 := 0; i1 < fh; i1++ {
 		compactWeightVec[i1] = make([][][][]float64, fw)
@@ -123,10 +138,6 @@ func compactGappedConvolution(cnn TensorCipher, co, st, fh, fw int, convWgt, bnV
 			}
 		}
 	}
-	elapse = time.Since(checkTime)
-	fmt.Printf("elapse - init CNN Weight: %s \n", elapse)
-
-	checkTime = time.Now()
 	selectOneVec := make([][]float64, co)
 	for i := 0; i < co; i++ {
 		bnValue := bnWgt[i] / math.Sqrt(bnVar[i]+epsilon)
@@ -141,10 +152,9 @@ func compactGappedConvolution(cnn TensorCipher, co, st, fh, fw int, convWgt, bnV
 			}
 		}
 	}
-	elapse = time.Since(checkTime)
-	fmt.Printf("elapse - init Select Vector: %s \n", elapse)
+	fmt.Println(selectOneVec[16][0])
 
-	ctzero := ctZero(context)
+	ctzero := ctZero(context, 0)
 	initScale := cnn.ciphers_[0].Scale
 
 	result_cipher := make([]*rlwe.Ciphertext, mo)
@@ -152,34 +162,46 @@ func compactGappedConvolution(cnn TensorCipher, co, st, fh, fw int, convWgt, bnV
 		result_cipher[i] = ctzero.CopyNew()
 	}
 
-	for i3 := 0; i3 < co; i3++ {
-		checkTime = time.Now()
-		cta := ctzero.CopyNew()
-		for m := 0; m < mi; m++ {
-			ctb := ctzero.CopyNew()
-			for i1 := 0; i1 < fh; i1++ {
-				for i2 := 0; i2 < fw; i2++ {
-					temp, _ := eval.MulNew(ctxt[m][i1][i2], compactWeightVec[i1][i2][m][i3])
-					_ = eval.Add(ctb, temp, ctb)
+	checkTime = time.Now()
+	wg.Add(threadNum)
+	for thidx := range threadNum {
+		go func() {
+			defer wg.Done()
+			for i3 := 0; i3 < co; i3++ {
+				if (i3-thidx)%threadNum != 0 {
+					continue
 				}
+				eval := evals[thidx]
+
+				cta := ctzero.CopyNew()
+				for m := 0; m < mi; m++ {
+					ctb := ctzero.CopyNew()
+					for i1 := 0; i1 < fh; i1++ {
+						for i2 := 0; i2 < fw; i2++ {
+							temp, _ := eval.MulNew(ctxt[m][i1][i2], compactWeightVec[i1][i2][m][i3])
+							_ = eval.Add(ctb, temp, ctb)
+						}
+					}
+
+					eval.RescaleTo(ctb, initScale, ctb)
+					ctc := sumSlot(ctb, ki, 1, context, thidx)
+					ctc = sumSlot(ctc, ki, ki*wi, context, thidx)
+					eval.Add(cta, ctc, cta)
+				}
+				r := -int((i3%(ko*ko))/ko)*ko*wo - (i3 % ko)
+				//temp, _ := eval.RotateNew(cta, r)
+				temp := rotCtNew(cta, r, context, thidx)
+				eval.Mul(temp, selectOneVec[i3], temp)
+				eval.Add(result_cipher[int(i3/(ko*ko))], temp, result_cipher[int(i3/(ko*ko))])
 			}
-
-			eval.RescaleTo(ctb, initScale, ctb)
-			ctc := sumSlot(ctb, ki, 1, context)
-			ctc = sumSlot(ctc, ki, ki*wi, context)
-			eval.Add(cta, ctc, cta)
-
-		}
-		r := -int((i3%(ko*ko))/ko)*ko*wo - (i3 % ko)
-		temp, _ := eval.RotateNew(cta, r)
-		eval.Mul(temp, selectOneVec[i3%(ko*ko)], temp)
-		eval.Add(result_cipher[int(i3/(ko*ko))], temp, result_cipher[int(i3/(ko*ko))])
-		runtime.GC()
-		elapse := time.Since(checkTime)
-		fmt.Printf("elapse - %dth out channel Conv: %s \n", i3, elapse)
+		}()
 	}
+	wg.Wait()
+	elapse = time.Since(checkTime)
+	fmt.Println("multyplexing end : ", elapse)
+
 	for i := 0; i < mo; i++ {
-		eval.RescaleTo(result_cipher[i], initScale, result_cipher[i])
+		evals[0].RescaleTo(result_cipher[i], initScale, result_cipher[i])
 	}
 	result := NewTensorCipher(ko, ho, wo, co, mo, logn, result_cipher)
 	return result
@@ -213,7 +235,7 @@ func compactGappedBatchNormPrint(cnn TensorCipher, bnbias, bnmean, bnvar, bnwgt 
 func compactGappedBatchNorm(cnn TensorCipher, bias, runningMean, runningVar, weight []float64, epsilon, B float64, context *Context) TensorCipher {
 	h, w, c, k, m := cnn.h_, cnn.w_, cnn.c_, cnn.k_, cnn.m_
 	n := 1 << cnn.logn_
-	eval := context.eval_
+	eval := context.evals_[0]
 
 	cm_iVec := make([][]float64, m)
 	for i := 0; i < m; i++ {
@@ -223,7 +245,7 @@ func compactGappedBatchNorm(cnn TensorCipher, bias, runningMean, runningVar, wei
 			i3 := (j / (k * w)) % (k * h)
 
 			if j < k*k*w*h {
-				index := (k*(i3%k) + (i4 % k)) + i*k*k
+				index := k*(i3%k) + (i4 % k) + i*k*k
 				cm_iVec[i][j] = bias[index] - weight[index]*runningMean[index]/math.Sqrt(runningVar[index]+epsilon)
 				cm_iVec[i][j] /= B
 			} else {
@@ -231,7 +253,7 @@ func compactGappedBatchNorm(cnn TensorCipher, bias, runningMean, runningVar, wei
 			}
 		}
 	}
-	fmt.Printf("%f \n", cm_iVec[0][0])
+	fmt.Printf("%f \n", cm_iVec[4][0])
 	result_cipher := make([]*rlwe.Ciphertext, m)
 	for i := 0; i < m; i++ {
 		result_cipher[i], _ = eval.AddNew(cnn.ciphers_[i], cm_iVec[i])
@@ -271,11 +293,23 @@ func approxReLU(cnnIn TensorCipher, alpha int, context *Context) (cnnOut TensorC
 	// parameter setting
 	h, w, k, c, m, logn := cnnIn.h_, cnnIn.w_, cnnIn.k_, cnnIn.c_, cnnIn.m_, cnnIn.logn_
 	ctxtIns := cnnIn.ciphers_
+	threadNum := context.threadNum_
 	result_cipher := make([]*rlwe.Ciphertext, m)
 
-	for i := 0; i < m; i++ {
-		result_cipher[i] = EvalApproxMinimaxReLU(ctxtIns[i], alpha, context)
+	var wg sync.WaitGroup
+	wg.Add(threadNum)
+	for threadidx := range threadNum {
+		go func() {
+			defer wg.Done()
+			for i := 0; i < m; i++ {
+				if (i-threadidx)%threadNum != 0 {
+					continue
+				}
+				result_cipher[i] = EvalApproxMinimaxReLU(ctxtIns[i].CopyNew(), alpha, context, threadidx)
+			}
+		}()
 	}
+	wg.Wait()
 
 	// temp = EvalApproxReLU(ctxtIn, alpha, context.eval_, context.params_)
 	// temp = EvalApproxReLUDebug(ctxtIn, alpha, context, context.params_)
@@ -323,8 +357,8 @@ func maxPooling(cnn TensorCipher, st, fh, fw, alpha int, context *Context) Tenso
 	if st == 2 {
 		ko, ho, wo, mo = ki*2, hi/2, wi/2, mi/(2*2)
 	}
-	eval := context.eval_
 	n := 1 << logn
+	threadNum := context.threadNum_
 	if ko != 4 {
 		fmt.Println("error")
 		os.Exit(0)
@@ -335,14 +369,14 @@ func maxPooling(cnn TensorCipher, st, fh, fw, alpha int, context *Context) Tenso
 		masking[h] = make([][]float64, fw)
 		for w := range fw {
 			masking[h][w] = make([]float64, n)
-			wg := ki * ((fw-1)/2 - w)
-			hg := ki * ((fh-1)/2 - h)
+			wg := ki * (w - (fw-1)/2)
+			hg := ki * (h - (fh-1)/2)
 			for j := range n {
-				i1 := n % (wi * ki)
-				i2 := (n / (wi * ki)) % (hi * ki)
+				i1 := j % (wi * ki)
+				i2 := (j / (wi * ki)) % (hi * ki)
 				w_ := (i1 + wg)
 				h_ := (i2 + hg)
-				if w_ >= 0 && w_ < ki*wi && h_ >= 0 && h_ < ki*hi {
+				if w_ >= 0 && w_ < ki*wi && h_ >= 0 && h_ < ki*hi && (j < ki*ki*hi*wi) {
 					masking[h][w][j] = 1
 				} else {
 					masking[h][w][j] = 0
@@ -350,7 +384,7 @@ func maxPooling(cnn TensorCipher, st, fh, fw, alpha int, context *Context) Tenso
 			}
 		}
 	}
-	maskingFinale := make([][]float64, n)
+	maskingFinale := make([][]float64, 4)
 	for i := 0; i < 4; i++ {
 		maskingFinale[i] = make([]float64, n)
 		for j := 0; j < n; j++ {
@@ -368,56 +402,80 @@ func maxPooling(cnn TensorCipher, st, fh, fw, alpha int, context *Context) Tenso
 
 	result_cipher := make([]*rlwe.Ciphertext, mo)
 	for i := range mo {
-		result_cipher[i] = ctZero(context)
+		result_cipher[i] = ctZero(context, 0)
 	}
 
-	for m := 0; m < mi; m++ {
-		ctxt := make([][]*rlwe.Ciphertext, fh)
-		for h := 0; h < fh; h++ {
-			ctxt[h] = make([]*rlwe.Ciphertext, fw)
-			for w := 0; w < fw; w++ {
-				r := ki*ki*wi*(h-(fh-1)/2) + ki*(w-(fw-1)/2)
-				ctxt[h][w], _ = eval.RotateNew(cnn.ciphers_[m], r)
-				eval.Mul(ctxt[h][w], masking[h][w], ctxt[h][w])
-				eval.Rescale(ctxt[h][w], ctxt[h][w])
+	var wg sync.WaitGroup
+	wg.Add(threadNum)
+	for thidx := range threadNum {
+		go func() {
+			defer wg.Done()
+			eval := context.evals_[thidx]
+			btp := context.btp15s_[thidx]
+			for m := 0; m < mi; m++ {
+				if (m-thidx)%threadNum != 0 {
+					continue
+				}
+
+				ctxt := make([][]*rlwe.Ciphertext, fh)
+				for h := 0; h < fh; h++ {
+					ctxt[h] = make([]*rlwe.Ciphertext, fw)
+					for w := 0; w < fw; w++ {
+						r := ki*ki*wi*(h-(fh-1)/2) + ki*(w-(fw-1)/2)
+						ctxt[h][w] = rotCtNew(cnn.ciphers_[m], r, context, thidx)
+						eval.Mul(ctxt[h][w], masking[h][w], ctxt[h][w])
+						eval.Rescale(ctxt[h][w], ctxt[h][w])
+						if m == 1 {
+							fmt.Println("1 of print ", h, ", ", w)
+							DecryptPrint(*context.params_, ctxt[h][w], *context.decryptor_, *context.encoders_[thidx])
+
+						}
+					}
+				}
+
+				fmt.Printf("%dth m is running... \n", m)
+				var max_temp [3]*rlwe.Ciphertext
+				for i := range 3 {
+					max_temp[i] = EvalApproxMinimaxMax3(ctxt[i][0], ctxt[i][1], ctxt[i][2], alpha, context, thidx)
+					max_temp[i], _ = btp.Bootstrap(max_temp[i])
+					temp, _ := eval.ConjugateNew(max_temp[i])
+					eval.Add(max_temp[i], temp, max_temp[i])
+				}
+				max := EvalApproxMinimaxMax3(max_temp[0], max_temp[1], max_temp[2], alpha, context, thidx)
+				r := ki*(m%2) + ki*ki*wi*((m/2)%2)
+				maxRot := rotCtNew(max, -r, context, thidx)
+				eval.Mul(maxRot, maskingFinale[m%4], maxRot)
+				fmt.Println(m, "th is end")
+				DecryptPrint(*context.params_, maxRot, *context.decryptor_, *context.encoders_[thidx])
+				eval.Add(result_cipher[m/4], maxRot, result_cipher[m/4])
+
 			}
-		}
+		}()
+	}
+	wg.Wait()
 
-		fmt.Printf("%dth m is running... \n", m)
-		var max_temp [3]*rlwe.Ciphertext
-		var wg sync.WaitGroup
-		wg.Add(3)
-		for i := range 3 {
-			max_temp[i] = EvalApproxMinimaxMax3(ctxt[i][0], ctxt[i][1], ctxt[i][2], alpha, context)
-		}
-		for i := range 3 {
-			go func() {
-				defer wg.Done()
-				max_temp[i], _ = context.btp15_[i].Bootstrap(max_temp[i])
-			}()
-		}
-		wg.Wait()
-		for i := range 3 {
-			temp, _ := eval.ConjugateNew(max_temp[i])
-			eval.Add(max_temp[i], temp, max_temp[i])
-		}
-		max := EvalApproxMinimaxMax3(max_temp[0], max_temp[1], max_temp[2], alpha, context)
-		fmt.Println("max is over")
-		r := ki*(m%2) + ki*ki*wi*((m/2)%2)
-		maxRot, _ := eval.RotateNew(max, r)
-		eval.Mul(maxRot, maskingFinale[m%4], maxRot)
-		eval.Add(result_cipher[m/4], maxRot, result_cipher[m/4])
+	wg.Add(threadNum)
+	for thidx := range threadNum {
+		eval := context.evals_[thidx]
+		go func() {
+			defer wg.Done()
+			for i := range mo {
+				if (i-thidx)%threadNum != 0 {
+					continue
+				}
+				eval.Rescale(result_cipher[i], result_cipher[i])
+			}
+		}()
 	}
-	for i := range mo {
-		eval.Rescale(result_cipher[i], result_cipher[i])
-	}
+	wg.Wait()
+
 	cnnOut := NewTensorCipher(ko, ho, wo, co, mo, logn, result_cipher)
 	return cnnOut
 }
 
-func bootstrapPrint(cnn TensorCipher, context *Context, stage, threadNum int, log_writer *bufio.Writer) TensorCipher {
+func bootstrapPrint(cnn TensorCipher, context *Context, stage int, log_writer *bufio.Writer) TensorCipher {
 	timeStart := time.Now()
-	cnnOut := bootstrapImageImaginary(cnn, threadNum, context)
+	cnnOut := bootstrapImageImaginary(cnn, context)
 	elapse := time.Since(timeStart)
 
 	str := fmt.Sprintln("===================================================================================")
@@ -440,32 +498,38 @@ func bootstrapPrint(cnn TensorCipher, context *Context, stage, threadNum int, lo
 	log_writer.Flush()
 	return cnnOut
 }
-func bootstrapImageImaginary(cnnIn TensorCipher, threadNum int, context *Context) (cnnOut TensorCipher) {
+func bootstrapImageImaginary(cnnIn TensorCipher, context *Context) (cnnOut TensorCipher) {
 	// parameters
 	mi, ki, hi, wi, ci, logn := cnnIn.m_, cnnIn.k_, cnnIn.h_, cnnIn.w_, cnnIn.c_, cnnIn.logn_
 	mo, ko, ho, wo, co := mi, ki, hi, wi, ci
 
 	result_cipher := make([]*rlwe.Ciphertext, mo)
+	threadNum := context.threadNum_
 
 	var wg sync.WaitGroup
 	wg.Add(threadNum)
-	for i3 := 0; i3 < threadNum; i3++ {
-		i3 := i3
+	for threadidx := range threadNum {
 		go func() {
 			defer wg.Done()
+
+			btp := context.btp15s_[threadidx]
+			eval := context.evals_[threadidx]
 			for i := 0; i < mo; i++ {
-				if i%threadNum == i3 {
-					fmt.Printf("boot %d: \n", i)
-					result_cipher[i], _ = context.btp15_[i3].Bootstrap(cnnIn.ciphers_[i])
+				if (i-threadidx)%threadNum != 0 {
+					continue
 				}
+				fmt.Printf("boot %d: \n", i)
+				var err error
+				result_cipher[i], err = btp.Bootstrap(cnnIn.ciphers_[i])
+				if err != nil {
+					fmt.Println(err)
+				}
+				temp2, _ := eval.ConjugateNew(result_cipher[i]) // imaginary removing bootstrapping
+				eval.Add(result_cipher[i], temp2, result_cipher[i])
 			}
 		}()
 	}
 	wg.Wait()
-	for i := 0; i < mo; i++ {
-		temp2, _ := context.eval_.ConjugateNew(result_cipher[i]) // imaginary removing bootstrapping
-		result_cipher[i], _ = context.eval_.AddNew(result_cipher[i], temp2)
-	}
 	cnnOut = NewTensorCipher(ko, ho, wo, co, mo, logn, result_cipher)
 	return cnnOut
 }
@@ -487,8 +551,8 @@ func NewTensorCipherFormData(k, h, w, c, m, logn, logq int, data [][]float64, co
 	for i := 0; i < c; i++ {
 		plaintext := hefloat.NewPlaintext(*context.params_, context.params_.MaxLevel())
 		plaintext.Scale = rlwe.NewScale(math.Pow(2.0, float64(logq)))
-		context.encoder_.Encode(data[i], plaintext)
-		cipher, err := context.encryptor_.EncryptNew(plaintext)
+		context.encoders_[0].Encode(data[i], plaintext)
+		cipher, err := context.encryptors_[0].EncryptNew(plaintext)
 		if err != nil {
 			panic(err)
 		}
@@ -528,39 +592,38 @@ func CopyTensorCipher(input TensorCipher) TensorCipher {
 }
 
 type Context struct {
-	encoder_   *hefloat.Encoder
-	encryptor_ *rlwe.Encryptor
-	decryptor_ *rlwe.Decryptor
-	sk_        *rlwe.SecretKey
-	pk_        *rlwe.PublicKey
-	btp15_     []*bootstrapping.Evaluator
-	rotkeys_   []*rlwe.GaloisKey
-	rlk_       *rlwe.RelinearizationKey
-	eval_      *hefloat.Evaluator
-	params_    *hefloat.Parameters
+	encoders_   []*hefloat.Encoder
+	encryptors_ []*rlwe.Encryptor
+	decryptor_  *rlwe.Decryptor
+	sk_         *rlwe.SecretKey
+	pk_         *rlwe.PublicKey
+	rts_        *map[int]struct{}
+	btp15s_     []*bootstrapping.Evaluator
+	evals_      []*hefloat.Evaluator
+	params_     *hefloat.Parameters
+	threadNum_  int
 }
 
-func NewContext(encoder *hefloat.Encoder, encryptor *rlwe.Encryptor, decryptor *rlwe.Decryptor, sk *rlwe.SecretKey,
-	pk *rlwe.PublicKey, btp15 []*bootstrapping.Evaluator, rotkeys []*rlwe.GaloisKey, rlk *rlwe.RelinearizationKey,
-	eval *hefloat.Evaluator, params *hefloat.Parameters) *Context {
+func NewContext(encoder []*hefloat.Encoder, encryptor []*rlwe.Encryptor, decryptor *rlwe.Decryptor, sk *rlwe.SecretKey,
+	pk *rlwe.PublicKey, rts *map[int]struct{}, btp15 []*bootstrapping.Evaluator, eval []*hefloat.Evaluator, params *hefloat.Parameters, threadNum int) *Context {
 	result := Context{
-		encoder_:   encoder,
-		encryptor_: encryptor,
-		decryptor_: decryptor,
-		sk_:        sk,
-		pk_:        pk,
-		btp15_:     btp15,
-		rotkeys_:   rotkeys,
-		rlk_:       rlk,
-		eval_:      eval,
-		params_:    params,
+		encoders_:   encoder,
+		encryptors_: encryptor,
+		decryptor_:  decryptor,
+		sk_:         sk,
+		pk_:         pk,
+		rts_:        rts,
+		btp15s_:     btp15,
+		evals_:      eval,
+		params_:     params,
+		threadNum_:  threadNum,
 	}
 	return &result
 }
 func decryptPrint(ciphertexts []*rlwe.Ciphertext, context *Context, num int) {
 	params := *context.params_
 	decryptor := *context.decryptor_
-	encoder := *context.encoder_
+	encoder := *context.encoders_[0]
 	// n := params.Slots()
 	valuesTest := make([]complex128, params.LogMaxSlots())
 	fmt.Print("/////////////////////////////////////////////////////////////////////\n")
@@ -583,7 +646,7 @@ func decryptPrint(ciphertexts []*rlwe.Ciphertext, context *Context, num int) {
 func decryptPrintTxt(ciphertexts []*rlwe.Ciphertext, output *bufio.Writer, context *Context, num int) {
 	params := *context.params_
 	decryptor := *context.decryptor_
-	encoder := *context.encoder_
+	encoder := *context.encoders_[0]
 	// n := params.Slots()
 	valuesTest := make([]complex128, params.MaxSlots())
 	fmt.Print("/////////////////////////////////////////////////////////////////////\n")

@@ -126,6 +126,8 @@ func (eval Evaluator) ShallowCopy() *Evaluator {
 	heEvaluator := eval.Evaluator.ShallowCopy()
 	params := eval.BootstrappingParameters
 	return &Evaluator{
+		Parameters:     eval.Parameters,
+		EvaluationKeys: eval.EvaluationKeys,
 		Mod1Parameters: eval.Mod1Parameters,
 		S2CDFTMatrix:   eval.S2CDFTMatrix,
 		C2SDFTMatrix:   eval.C2SDFTMatrix,
